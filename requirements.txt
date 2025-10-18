@@ -1,0 +1,45 @@
+# ==========================
+# Projeto: Bem-Estar Docente - Chile (PISA 2018)
+# Autor: Prof. Kleber
+# Finalidade: Análise de dados e geração de evidências para políticas públicas
+# ==========================
+
+# Leitura e manipulação de dados
+pandas
+numpy
+openpyxl
+
+# Visualização e gráficos
+matplotlib
+seaborn
+
+# Análise estatística e modelagem
+scikit-learn
+statsmodels
+scipy
+
+# Ferramentas de mineração de dados e aprendizado
+orange3
+
+# Geração de relatórios e arquivos
+reportlab
+fpdf
+
+# Utilitários e ferramentas de apoio
+tqdm
+tabulate
+prettytable
+
+# Interface opcional (para visualização interativa)
+gradio
+streamlit
+
+# Diagnóstico e validação de modelo
+pingouin
+
+# Gerenciamento de variáveis de ambiente
+python-dotenv
+
+# Integração com APIs de IA generativa
+groq 
+google-generativeai
