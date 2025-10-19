@@ -37,7 +37,7 @@ def _ler_conteudos_para_prompt() -> str:
     """Carrega os principais artefatos em texto para embutir no prompt."""
     partes = []
 
-    # Variáveis significativas (Etapa 9)
+    # (1) Variáveis significativas (Etapa 9)
     var_sig = Path("resultados/tabelas/variaveis_significativas.csv")
     if var_sig.exists():
         try:
@@ -49,7 +49,7 @@ def _ler_conteudos_para_prompt() -> str:
     else:
         partes.append("(Arquivo de variáveis significativas não encontrado.)")
 
-    # Resultados OLS (Etapa 7)
+    # (2) Resultados OLS (Etapa 7)
     ols = Path("resultados/tabelas/modelo_ols_resultados.csv")
     if ols.exists():
         try:
@@ -60,6 +60,33 @@ def _ler_conteudos_para_prompt() -> str:
             partes.append(f"(Falha ao ler {ols}: {e})")
     else:
         partes.append("\n(Arquivo de resultados OLS não encontrado.)")
+
+    # (3) Comparação de modelos (Etapa 7 – seleção automática)
+    comp = Path("resultados/tabelas/comparacao_modelos.csv")
+    meta = Path("resultados/tabelas/melhor_modelo.json")
+    if comp.exists() and meta.exists():
+        try:
+            dfc = pd.read_csv(comp)
+            meta_json = json.loads(meta.read_text(encoding="utf-8"))
+            partes.append("\n\n### Comparação de Modelos (ranking)\n")
+            # ordena para facilitar a leitura: R2_CV desc, RMSE asc, R2_aj desc, AIC asc
+            dfc["__r2cv"] = dfc["R2_CV"].fillna(-1e9)
+            dfc["__rmse"] = dfc["RMSE_CV"].fillna(1e9)
+            dfc["__r2aj"] = dfc["R2_ajustado"].fillna(-1e9)
+            dfc["__aic"]  = dfc["AIC"].fillna(1e9)
+            dfc = dfc.sort_values(by=["__r2cv","__rmse","__r2aj","__aic"], ascending=[False,True,False,True])
+            partes.append(dfc[["modelo","R2_CV","RMSE_CV","R2_ajustado","AIC","BIC","notas"]].head(6).to_string(index=False))
+
+            partes.append("\n\n### Modelo selecionado automaticamente\n")
+            partes.append(f"Melhor modelo: {meta_json.get('melhor_modelo')}")
+            partes.append(f"Critério: {meta_json.get('criterio')}")
+            partes.append(f"Alvo: {meta_json.get('alvo')}")
+            partes.append(f"Total de variáveis: {len(meta_json.get('features', []))}")
+            partes.append("\n(Justifique no texto: o modelo foi escolhido por apresentar melhor desempenho segundo o critério acima.)")
+        except Exception as e:
+            partes.append(f"(Falha ao ler comparação/metadata da Etapa 7: {e})")
+    else:
+        partes.append("\n(Arquivos de comparação de modelos não encontrados.)")
 
     return "\n".join(partes)
 

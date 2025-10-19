@@ -1,164 +1,412 @@
 # ============================================================
-# ETAPA 07 - DESCOBERTA DE PADRÕES E MODELAGEM
+# ETAPA 07 – DESCOBERTA DE MODELOS
 # ------------------------------------------------------------
-# Objetivo:
-#   - Ajustar modelos estatísticos de regressão (OLS) para
-#     identificar relações significativas entre variáveis
-#     explicativas e o índice de bem-estar docente.
-#   - Estimar a contribuição de fatores formativos, pedagógicos
-#     e contextuais sobre o bem-estar dos professores de Matemática.
-#
-# Saída esperada:
-#   - Modelo OLS ajustado
-#   - Tabela de coeficientes e métricas estatísticas exportada
+# - Ajusta OLS (com fallback por matriz) e compara com
+#   Huber, Polinomial (grau 2), RandomForest, GradientBoosting
+#   e Logística Ordinal (se faixa existir).
+# - Seleciona o melhor modelo por prioridade:
+#     1) maior R2_CV
+#     2) menor RMSE_CV
+#     3) maior R2_ajustado
+#     4) AIC/BIC (desempate)
+# - Salva artefatos para a Etapa 11 justificar a escolha.
+# - Retorna o OLS ajustado para compatibilidade com Etapas 9 e 10.
 # ============================================================
 
-import os
+from __future__ import annotations
+
+import warnings
+warnings.filterwarnings("ignore")
+
+from pathlib import Path
+from datetime import datetime
+import json
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from statsmodels.miscmodels.ordinal_model import OrderedModel
+
+from sklearn.model_selection import KFold, cross_val_score
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LinearRegression, HuberRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.inspection import PartialDependenceDisplay
+
 from utils_log import log_mensagem
 
 
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
-def _mapear_valor(v):
-    """
-    Conversão robusta de categorias textuais para valores numéricos.
-    Mantém consistência com a Etapa 05.
-    """
-    if pd.isna(v):
-        return np.nan
+# ============================== utilidades ==============================
 
-    s = str(v).strip().lower()
+def _garantir_pastas():
+    Path("resultados/figuras").mkdir(parents=True, exist_ok=True)
+    Path("resultados/tabelas").mkdir(parents=True, exist_ok=True)
+    Path("resultados/textos").mkdir(parents=True, exist_ok=True)
+    Path("resultados/modelos").mkdir(parents=True, exist_ok=True)
 
-    # Likert (inglês)
-    likert = {
-        "strongly disagree": 1,
-        "disagree": 2,
-        "neutral": 3,
-        "agree": 4,
-        "strongly agree": 5,
-    }
-    if s in likert:
-        return float(likert[s])
+def _nome_alvo(df: pd.DataFrame) -> str:
+    for c in ["indice_bem_estar_norm", "ibd", "indice_bem_estar"]:
+        if c in df.columns:
+            return c
+    raise ValueError("Alvo do IBD não encontrado (espere 'indice_bem_estar_norm' ou 'ibd' ou 'indice_bem_estar').")
 
-    # Binários (inglês/português) e booleanos comuns
-    positivos = {"checked", "yes", "sim", "true", "1", "y", "s"}
-    negativos = {"not checked", "no", "não", "nao", "false", "0", "n"}
+def _features_base(df: pd.DataFrame, alvo: str) -> list[str]:
+    preferidas = [
+        "apoio_direcao_media", "clima_escolar_media", "autonomia_media",
+        "carga_trabalho_media", "formacao_continuada", "formacao_continuada_media",
+        "horas_semanais", "tempo_experiencia", "idade"
+    ]
+    cols = [c for c in preferidas if c in df.columns]
+    if len(cols) >= 4:
+        return cols
+    num_cols = df.select_dtypes(include=["number"]).columns
+    excluir = {alvo, "cluster", "CNT", "CNTSCHID", "CNTTCHID"}
+    cols = [c for c in num_cols if c not in excluir and not c.lower().startswith("pca")]
+    if len(cols) < 3:
+        raise ValueError("Variáveis explicativas insuficientes.")
+    return cols[:25]
 
-    if s in positivos:
-        return 1.0
-    if s in negativos:
-        return 0.0
+def _cv_regressor(modelo, X, y, cv=5):
+    kf = KFold(n_splits=cv, shuffle=True, random_state=42)
+    rmse = -cross_val_score(modelo, X, y, scoring="neg_root_mean_squared_error", cv=kf).mean()
+    mae  = -cross_val_score(modelo, X, y, scoring="neg_mean_absolute_error", cv=kf).mean()
+    r2   =  cross_val_score(modelo, X, y, scoring="r2", cv=kf).mean()
+    return rmse, mae, r2
 
-    # Tentativa de conversão numérica direta
+def _diagnosticos_ols(y, yhat, residuos, caminho):
     try:
-        return float(s)
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
+        axes[0].scatter(yhat, residuos, s=12, alpha=0.7)
+        axes[0].axhline(0, linestyle="--", linewidth=1)
+        axes[0].set_title("Resíduos vs Ajustados")
+        axes[0].set_xlabel("Ajustados")
+        axes[0].set_ylabel("Resíduos")
+        sm.qqplot(residuos, line="45", fit=True, ax=axes[1])
+        axes[1].set_title("Q-Q Plot dos Resíduos")
+        axes[2].scatter(y, yhat, s=12, alpha=0.7)
+        lims = [min(float(y.min()), float(yhat.min())), max(float(y.max()), float(yhat.max()))]
+        axes[2].plot(lims, lims, "--", linewidth=1)
+        axes[2].set_title("Predito vs Observado")
+        axes[2].set_xlabel("Observado")
+        axes[2].set_ylabel("Predito")
+        plt.tight_layout()
+        plt.savefig(caminho, bbox_inches="tight")
+        plt.close()
     except Exception:
-        return np.nan
+        pass
 
+def _plotar_importancias_rf(modelo_rf, nomes, caminho):
+    try:
+        imp = pd.Series(modelo_rf.feature_importances_, index=nomes).sort_values(ascending=False)[:20]
+        plt.figure(figsize=(9, 7))
+        imp.iloc[::-1].plot(kind="barh")
+        plt.title("Importância das Variáveis – Random Forest (Top 20)")
+        plt.tight_layout()
+        plt.savefig(caminho, bbox_inches="tight")
+        plt.close()
+    except Exception:
+        pass
 
-def _converter_dataframe_numerico(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aplica o mapeador robusto apenas nas colunas object e
-    força numérico nas demais; retorna DataFrame float.
-    """
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype == "O":
-            df[col] = df[col].map(_mapear_valor)
-        # Coerção final para numérico
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.astype(float)
-
-
-# ============================================================
-# FUNÇÃO PRINCIPAL
-# ============================================================
-def ajustar_modelo(df: pd.DataFrame):
-    etapa = "ETAPA 7 - Descoberta de Padrões e Modelagem"
-    log_mensagem(etapa, "Ajustando modelo de regressão OLS...", "inicio")
-
-    # ============================================================
-    # 1) Seleção e cópia das variáveis relevantes
-    # ------------------------------------------------------------
-    variaveis = [c for c in df.columns if "TC0" in c or "indice_bem_estar" in c]
-    df_modelo = df[variaveis].copy()
-
-    # ============================================================
-    # 2) Conversão robusta para formato numérico
-    # ------------------------------------------------------------
-    # Elimina o uso de .replace() para evitar FutureWarning.
-    # Garante dtype float em todas as colunas.
-    # ============================================================
-    df_modelo = _converter_dataframe_numerico(df_modelo)
-
-    # ============================================================
-    # 3) Definição da variável dependente e preditoras
-    # ------------------------------------------------------------
-    if "indice_bem_estar_norm" not in df_modelo.columns:
-        raise ValueError("[ERRO] Coluna 'indice_bem_estar_norm' não encontrada para modelagem.")
-
-    y = df_modelo["indice_bem_estar_norm"].astype(float)
-    X = df_modelo.drop(columns=["indice_bem_estar", "indice_bem_estar_norm"], errors="ignore")
-
-    # Remove colunas totalmente nulas
-    X = X.dropna(axis=1, how="all")
-
-    # Remove colunas sem variância (constantes)
-    if not X.empty:
-        variancias = X.var(numeric_only=True)
-        cols_variancia_zero = variancias[variancias == 0.0].index.tolist()
-        if cols_variancia_zero:
-            X = X.drop(columns=cols_variancia_zero, errors="ignore")
-
-    # Checagem após limpeza
-    if X.empty:
-        raise ValueError("[ERRO] Não há variáveis explicativas numéricas válidas após a limpeza.")
-
-    # ============================================================
-    # 4) Alinhamento de índices e remoção de NaNs linha a linha
-    # ------------------------------------------------------------
-    dados = pd.concat([y.rename("y"), X], axis=1)
-    dados = dados.dropna(axis=0, how="any")
-
-    if dados.empty:
-        raise ValueError("[ERRO] Não há observações completas para ajustar o modelo OLS.")
-
-    y_valid = dados["y"].astype(float)
-    X_valid = dados.drop(columns=["y"]).astype(float)
-    X_valid = sm.add_constant(X_valid, has_constant="add")
-
-    # ============================================================
-    # 5) Ajuste do modelo OLS
-    # ------------------------------------------------------------
-    modelo = sm.OLS(y_valid, X_valid, missing="drop").fit()
-
-    # ============================================================
-    # 6) Exportação dos resultados
-    # ------------------------------------------------------------
-    os.makedirs("resultados/tabelas", exist_ok=True)
-    path_csv = "resultados/tabelas/modelo_ols_resultados.csv"
-
-    confint = modelo.conf_int()
-    resumo_df = pd.DataFrame({
-        "Variável": modelo.params.index,
-        "Coeficiente": modelo.params.values,
-        "P-Valor": modelo.pvalues.values,
-        "IC_Inf": confint[0].values,
-        "IC_Sup": confint[1].values
-    })
-
-    resumo_df.to_csv(path_csv, index=False, encoding="utf-8-sig")
-
-    log_mensagem(
-        etapa,
-        f"Modelagem concluída. R² = {modelo.rsquared:.4f} | R² ajustado = {modelo.rsquared_adj:.4f} | "
-        f"Observações = {int(modelo.nobs)}",
-        "fim"
+def _escore_modelo(linha):
+    # Maior R2_CV -> menor RMSE_CV -> maior R2_aj -> menor AIC/BIC
+    r2cv = linha.get("R2_CV", np.nan)
+    rmse = linha.get("RMSE_CV", np.nan)
+    r2aj = linha.get("R2_ajustado", np.nan)
+    aic  = linha.get("AIC", np.nan)
+    bic  = linha.get("BIC", np.nan)
+    return (
+        r2cv if pd.notna(r2cv) else -1e9,
+        -rmse if pd.notna(rmse) else -1e9,
+        r2aj if pd.notna(r2aj) else -1e9,
+        -aic if pd.notna(aic) else -1e9,
+        -bic if pd.notna(bic) else -1e9
     )
-    log_mensagem(etapa, f"Tabela de resultados OLS salva em '{path_csv}'.", "fim")
 
-    return modelo
+
+# ============================== núcleo público ==============================
+
+def ajustar_modelo(respostas: pd.DataFrame):
+    """
+    Ajusta OLS (com nomes seguros e alvo citado), compara modelos, seleciona o melhor e salva artefatos.
+    Retorna o OLS (compatibilidade com Etapas 9 e 10).
+    """
+    etapa = "ETAPA 7 – Descoberta de Modelos"
+    log_mensagem(etapa, "Iniciando ajuste e comparacao...", "inicio")
+    _garantir_pastas()
+
+    # 1) alvo e features
+    alvo = _nome_alvo(respostas)
+    X_cols = _features_base(respostas, alvo)
+
+    y = pd.to_numeric(respostas[alvo], errors="coerce").astype(float)
+    X = respostas[X_cols].apply(pd.to_numeric, errors="coerce")
+    dados = pd.concat([X, y], axis=1).dropna()
+    X = dados[X_cols]
+    y = dados[alvo]
+
+    # 2) sanitização de nomes (para OLS em fórmula)
+    safe_cols = {}
+    for i, col in enumerate(X_cols, start=1):
+        safe = (
+            col.replace(":", "_").replace("<", "").replace(">", "")
+               .replace("[", "").replace("]", "").replace("?", "")
+               .replace("(", "").replace(")", "").replace(".", "_")
+               .replace("/", "_").replace(" ", "_")
+        )
+        safe_cols[col] = f"var_{i}_" + safe[:40]
+
+    X_ren = X.rename(columns=safe_cols)
+    dados_ren = pd.concat([X_ren, y], axis=1)
+
+    # Mapa de nomes
+    pd.DataFrame(list(safe_cols.items()), columns=["original", "ols_nome"]) \
+        .to_csv("resultados/tabelas/mapa_variaveis_ols.csv", index=False, encoding="utf-8-sig")
+
+    # 3) fórmula segura (alvo citado)
+    formula = "Q('{y}') ~ {rhs}".format(y=alvo, rhs=" + ".join(X_ren.columns))
+
+    resultados = []
+
+    # --------------------------- OLS (com fallback) ---------------------------
+    modelo_ols = None
+    try:
+        modelo_ols = smf.ols(formula, data=dados_ren).fit()
+    except Exception as e_form:
+        try:
+            X_mat = sm.add_constant(X_ren, has_constant="add")
+            modelo_ols = sm.OLS(y, X_mat).fit()
+        except Exception as e_matrix:
+            log_mensagem(etapa, f"Falha OLS (fórmula e matriz): {e_form} | {e_matrix}", "erro")
+
+    if modelo_ols is not None:
+        # nomes dos regressores no ajuste (para montar tabela)
+        if hasattr(modelo_ols, "model") and hasattr(modelo_ols.model, "exog_names"):
+            nomes_ols = modelo_ols.model.exog_names
+        else:
+            nomes_ols = ["const"] + list(X_ren.columns)
+
+        ols_df = pd.DataFrame({
+            "ols_nome": nomes_ols,
+            "coeficiente": modelo_ols.params.values,
+            "p_valor": modelo_ols.pvalues.values
+        })
+
+        mapa = pd.read_csv("resultados/tabelas/mapa_variaveis_ols.csv")
+        ols_merged = ols_df.merge(mapa, how="left", on="ols_nome")
+        if "original" in ols_merged.columns:
+            ols_merged.loc[ols_merged["ols_nome"] == "const", "original"] = "Intercepto"
+            ols_merged = ols_merged[["original", "ols_nome", "coeficiente", "p_valor"]]
+
+        ols_merged.to_csv("resultados/tabelas/modelo_ols_resultados.csv", index=False, encoding="utf-8-sig")
+
+        _diagnosticos_ols(y, modelo_ols.fittedvalues, modelo_ols.resid,
+                          "resultados/figuras/diagnosticos_residuos_ols.png")
+
+        resultados.append({
+            "modelo": "OLS",
+            "R2_ajustado": float(getattr(modelo_ols, "rsquared_adj", np.nan)),
+            "AIC": float(getattr(modelo_ols, "aic", np.nan)),
+            "BIC": float(getattr(modelo_ols, "bic", np.nan)),
+            "RMSE_CV": np.nan, "MAE_CV": np.nan, "R2_CV": np.nan,
+            "notas": "Regressão linear (via fórmula ou matriz, conforme disponível)"
+        })
+        log_mensagem("PIPELINE GERAL", "Modelo OLS ajustado com sucesso.", "info")
+    else:
+        log_mensagem(etapa, "Falha OLS: mesmo com fallback por matriz.", "erro")
+
+    # ------------------- OLS com interação (apoio x carga) -------------------
+    if "apoio_direcao_media" in X_cols and "carga_trabalho_media" in X_cols:
+        try:
+            apoio_safe = safe_cols.get("apoio_direcao_media", "apoio_direcao_media")
+            carga_safe = safe_cols.get("carga_trabalho_media", "carga_trabalho_media")
+            outras = [safe_cols.get(c, c) for c in X_cols if c not in ["apoio_direcao_media", "carga_trabalho_media"]]
+            formula_i = "Q('{y}') ~ {a} * {c}".format(y=alvo, a=apoio_safe, c=carga_safe)
+            if outras:
+                formula_i += " + " + " + ".join(outras)
+            modelo_inter = smf.ols(formula_i, data=dados_ren).fit()
+            resultados.append({
+                "modelo": "OLS_interacao_apoioXcarga",
+                "R2_ajustado": float(modelo_inter.rsquared_adj),
+                "AIC": float(modelo_inter.aic), "BIC": float(modelo_inter.bic),
+                "RMSE_CV": np.nan, "MAE_CV": np.nan, "R2_CV": np.nan,
+                "notas": "Inclui termo de interação apoio x carga"
+            })
+        except Exception as e:
+            log_mensagem(etapa, f"Falha OLS_interacao: {e}", "erro")
+
+    # --------------------------- Huber (robusta) -----------------------------
+    try:
+        huber = Pipeline([("sc", StandardScaler()), ("reg", HuberRegressor())])
+        rmse, mae, r2 = _cv_regressor(huber, X, y, cv=5)
+        resultados.append({
+            "modelo": "Regressao_Robusta_Huber",
+            "R2_ajustado": np.nan, "AIC": np.nan, "BIC": np.nan,
+            "RMSE_CV": rmse, "MAE_CV": mae, "R2_CV": r2,
+            "notas": "Resistente a outliers"
+        })
+    except Exception as e:
+        log_mensagem(etapa, f"Falha Huber: {e}", "erro")
+
+    # ----------------------- Polinomial (grau 2) -----------------------------
+    try:
+        poly = ColumnTransformer([
+            ("num", Pipeline([
+                ("sc", StandardScaler()),
+                ("poly", PolynomialFeatures(2, include_bias=False))
+            ]), X_cols)
+        ])
+        pipe_poly = Pipeline([("prep", poly), ("reg", LinearRegression())])
+        rmse, mae, r2 = _cv_regressor(pipe_poly, X, y, cv=5)
+        resultados.append({
+            "modelo": "Regressao_Polinomial_grau2",
+            "R2_ajustado": np.nan, "AIC": np.nan, "BIC": np.nan,
+            "RMSE_CV": rmse, "MAE_CV": mae, "R2_CV": r2,
+            "notas": "Captura curvaturas"
+        })
+    except Exception as e:
+        log_mensagem(etapa, f"Falha Polinomial: {e}", "erro")
+
+    # --------------------------- Random Forest -------------------------------
+    try:
+        rf = RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1)
+        rmse, mae, r2 = _cv_regressor(rf, X, y, cv=5)
+        resultados.append({
+            "modelo": "RandomForestRegressor",
+            "R2_ajustado": np.nan, "AIC": np.nan, "BIC": np.nan,
+            "RMSE_CV": rmse, "MAE_CV": mae, "R2_CV": r2,
+            "notas": "Não-linear + importâncias"
+        })
+        rf_final = RandomForestRegressor(n_estimators=600, random_state=42, n_jobs=-1)
+        rf_final.fit(X, y)
+        _plotar_importancias_rf(rf_final, X.columns, "resultados/figuras/feature_importances_rf.png")
+        principais = [c for c in ["apoio_direcao_media", "carga_trabalho_media", "clima_escolar_media"] if c in X.columns][:2]
+        if principais:
+            fig, ax = plt.subplots(figsize=(7, 5))
+            PartialDependenceDisplay.from_estimator(rf_final, X, principais, ax=ax)
+            plt.tight_layout()
+            plt.savefig("resultados/figuras/curva_parcial_dependencia.png", bbox_inches="tight")
+            plt.close()
+    except Exception as e:
+        log_mensagem(etapa, f"Falha RandomForest: {e}", "erro")
+
+    # ------------------------- Gradient Boosting -----------------------------
+    try:
+        gbr = GradientBoostingRegressor(random_state=42)
+        rmse, mae, r2 = _cv_regressor(gbr, X, y, cv=5)
+        resultados.append({
+            "modelo": "GradientBoostingRegressor",
+            "R2_ajustado": np.nan, "AIC": np.nan, "BIC": np.nan,
+            "RMSE_CV": rmse, "MAE_CV": mae, "R2_CV": r2,
+            "notas": "Ensemble aditivo"
+        })
+    except Exception as e:
+        log_mensagem(etapa, f"Falha GradientBoosting: {e}", "erro")
+
+    # ------------------------- Logística Ordinal -----------------------------
+# ------------------------- Logistica Ordinal -----------------------------
+    if "faixa_bem_estar" in respostas.columns:
+        try:
+            # Base alinhada às mesmas linhas usadas nas outras comparações
+            ord_df = dados.copy()
+            ord_df["faixa_bem_estar"] = respostas.loc[ord_df.index, "faixa_bem_estar"]
+
+            # (1) X numérico (float) e filtragem de linhas válidas
+            X_ord_df = ord_df[X_cols].apply(pd.to_numeric, errors="coerce")
+            y_raw = ord_df["faixa_bem_estar"]
+            mask_valid = X_ord_df.notna().all(axis=1) & y_raw.notna()
+            X_ord_df = X_ord_df.loc[mask_valid]
+            y_raw = y_raw.loc[mask_valid]
+
+            # (2) Normalização de rótulos (evita “Medio” x “Médio”)
+            y_raw = y_raw.replace({"Medio": "Médio"})
+
+            # (3) Remoção de colunas constantes (interceptos implícitos / variância zero)
+            #    - OrderedModel NÃO aceita intercepto
+            nun = X_ord_df.nunique(dropna=False)
+            const_cols = nun.index[nun <= 1].tolist()
+            if const_cols:
+                X_ord_df = X_ord_df.drop(columns=const_cols, errors="ignore")
+                log_mensagem(etapa, f"Logística Ordinal: removidas colunas constantes: {const_cols}", "aviso")
+
+            # Se tudo virou vazio após remoção, aborta de forma limpa
+            if X_ord_df.shape[1] == 0:
+                log_mensagem(etapa, "Logística Ordinal não aplicada (todas as colunas constantes).", "aviso")
+                raise RuntimeError("Sem preditores após remover constantes")
+
+            # (4) Pelo menos 2 categorias no y
+            cats_presentes = list(pd.Series(y_raw.unique()).dropna())
+            cats_ordem = [c for c in ["Baixo", "Médio", "Alto"] if c in cats_presentes]
+            if len(cats_ordem) < 2:
+                log_mensagem(etapa, "Logística Ordinal não aplicada (categorias insuficientes).", "aviso")
+                raise RuntimeError("Categorias insuficientes")
+
+            # (5) Conversão final: X ndarray float e y códigos inteiros 0..K-1
+            X_ord = np.asarray(X_ord_df.values, dtype=float)
+            y_cat = pd.Categorical(y_raw, ordered=True, categories=cats_ordem)
+            y_codes = y_cat.codes.astype(int)
+
+            # (6) Ajuste e métricas (in-sample) para referência
+            modelo_ord = OrderedModel(y_codes, X_ord, distr="logit").fit(method="bfgs", disp=False)
+            probs = modelo_ord.predict()
+            y_labels = np.array(cats_ordem)
+            y_pred = y_labels[np.argmax(probs, axis=1)]
+
+            from sklearn.metrics import accuracy_score, f1_score
+            acc = accuracy_score(y_cat, y_pred)
+            f1m = f1_score(y_cat, y_pred, average="macro")
+
+            resultados.append({
+                "modelo": "Logistica_Ordinal",
+                "R2_ajustado": np.nan,
+                "AIC": float(modelo_ord.aic), "BIC": np.nan,
+                "RMSE_CV": np.nan, "MAE_CV": np.nan, "R2_CV": np.nan,
+                "notas": f"Acuracia_in={acc:.3f}; F1_macro_in={f1m:.3f}"
+            })
+        except Exception as e:
+            # Aviso apenas; não interrompe o pipeline
+            log_mensagem(etapa, f"Logistica Ordinal não ajustada: {e}", "aviso")
+
+    # ------------------- consolidação / seleção do melhor --------------------
+    comp = pd.DataFrame(resultados)
+    comp["gerado_em"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    comp.to_csv("resultados/tabelas/comparacao_modelos.csv", index=False, encoding="utf-8-sig")
+
+    # Seleção do melhor conforme prioridade
+    comp_dicts = comp.fillna(np.nan).to_dict(orient="records")
+    melhor = max(comp_dicts, key=lambda r: (
+        r.get("R2_CV", -1e9) if pd.notna(r.get("R2_CV", np.nan)) else -1e9,
+        -r.get("RMSE_CV", 1e9) if pd.notna(r.get("RMSE_CV", np.nan)) else -1e9,
+        r.get("R2_ajustado", -1e9) if pd.notna(r.get("R2_ajustado", np.nan)) else -1e9,
+        -r.get("AIC", 1e9) if pd.notna(r.get("AIC", np.nan)) else -1e9,
+        -r.get("BIC", 1e9) if pd.notna(r.get("BIC", np.nan)) else -1e9
+    ))
+
+    meta = {
+        "melhor_modelo": melhor.get("modelo"),
+        "criterio": "prioridade: maior R2_CV; depois menor RMSE_CV; depois maior R2_ajustado; AIC/BIC como desempate",
+        "alvo": alvo,
+        "features": list(X_cols),
+        "tabela_resumo_path": "resultados/tabelas/comparacao_modelos.csv"
+    }
+    Path("resultados/tabelas/melhor_modelo.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    Path("resultados/textos/melhor_modelo.txt").write_text(
+        "Melhor modelo: {m}\nCriterio: {c}\nAlvo: {a}\nFeatures: {n}\n\n{t}\n".format(
+            m=meta["melhor_modelo"], c=meta["criterio"], a=meta["alvo"],
+            n=len(meta["features"]), t=comp.to_string(index=False)
+        ),
+        encoding="utf-8"
+    )
+
+    log_mensagem(etapa, f"Melhor modelo selecionado: {meta['melhor_modelo']}", "fim")
+
+    # ------------------- retorno (compatibilidade) ---------------------------
+    if modelo_ols is None:
+        # Mantém compatibilidade com o fluxo que espera OLS
+        raise RuntimeError("OLS nao pode ser ajustado.")
+    return modelo_ols
