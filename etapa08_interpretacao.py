@@ -130,18 +130,40 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
         num_df = num_df.apply(pd.to_numeric, errors="coerce")
         corr = num_df.corr()
 
-        plt.figure(figsize=(10, 8))
-        im = plt.imshow(corr.values, aspect="auto")
+        # Cria a figura maior e ajusta a densidade
+        plt.figure(figsize=(20, 16))  # 🔹 tamanho ampliado
+        im = plt.imshow(corr.values, aspect="auto", cmap="viridis")
         plt.colorbar(im, fraction=0.046, pad=0.04)
-        plt.xticks(range(len(corr.columns)), corr.columns, rotation=90)
-        plt.yticks(range(len(corr.index)), corr.index)
-        plt.title("Mapa de calor de correlações")
-        plt.tight_layout(); plt.savefig("resultados/figuras/mapa_calor_correlacoes.png"); plt.close()
-        _salvar_tabela(corr.reset_index().rename(columns={"index": "variavel"}), "resultados/tabelas/correlacoes.csv")
-        log_mensagem(etapa, "Mapa de calor de correlações e tabela salvos.", "info")
-    except Exception:
-        pass
 
+        # 🔹 Define os rótulos e aplica rotação e ajuste fino
+        plt.xticks(
+            range(len(corr.columns)),
+            corr.columns,
+            rotation=45,
+            ha='right',
+            fontsize=8
+        )
+        plt.yticks(
+            range(len(corr.index)),
+            corr.index,
+            fontsize=8
+        )
+
+        plt.title("Mapa de calor de correlações entre variáveis", fontsize=14, pad=20)
+        plt.tight_layout()
+        plt.savefig("resultados/figuras/mapa_calor_correlacoes.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 🔹 Salva também a matriz de correlações em CSV
+        _salvar_tabela(
+            corr.reset_index().rename(columns={"index": "variavel"}),
+            "resultados/tabelas/correlacoes.csv"
+        )
+
+        log_mensagem(etapa, "Mapa de calor de correlações e tabela salvos.", "info")
+
+    except Exception as e:
+        log_mensagem(etapa, f"Falha ao gerar mapa de calor: {e}", "erro")
     # ———————————— Boxplot por cluster ————————————
     try:
         if "cluster" in df.columns:

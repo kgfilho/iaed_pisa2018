@@ -2,7 +2,7 @@
 # ETAPA PRINCIPAL – PIPELINE GERAL DE ANÁLISE (PISA 2018)
 # ==========================================================
 # Projeto: Bem-Estar Docente no Chile
-# Autor: Prof. Kleber
+# Autor(es): Prof. Kleber, Profª. Crsitiane e Profª. Mariah
 # Descrição: Execução sequencial das 10 etapas do processo KDD
 #            + (opcional) Etapa 11: Relatório automatizado com LLM (GROQ ou GOOGLE)
 # ==========================================================
