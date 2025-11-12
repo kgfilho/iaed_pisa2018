@@ -1,16 +1,11 @@
 # ============================================================
-# ETAPA 06 - MINERAÇÃO DE DADOS
+# ETAPA 06 - MINERAÇÃO DE DADOS (VERSÃO CORRIGIDA)
 # ------------------------------------------------------------
 # Objetivo:
-#   - Aplicar técnicas de redução de dimensionalidade (PCA)
-#     e agrupamento (K-Means) sobre os dados transformados.
-#   - Gerar agrupamentos de docentes por padrões de respostas
-#     e calcular a variância explicada.
-#   - Registrar logs em cada fase do processo.
-#
-# Saída esperada:
-#   - DataFrame enriquecido com colunas PCA1, PCA2 e Cluster.
-#   - Modelo KMeans ajustado.
+#   - Aplicar PCA e K-Means.
+#   - (CORRIGIDO) Lidar com valores NaN gerados na Etapa 5
+#     (ex: índices de docentes que não responderam)
+#     para evitar falhas no PCA.
 # ============================================================
 
 import logging
@@ -23,18 +18,22 @@ from utils_log import log_mensagem
 
 
 # ============================================================
-# FUNÇÃO PRINCIPAL
+# FUNÇÃO PRINCIPAL (MODIFICADA)
 # ============================================================
 def minerar_dados(df: pd.DataFrame):
     """
     Executa a análise de componentes principais (PCA)
     e o agrupamento K-Means para identificar padrões
     nos dados docentes do PISA 2018.
+
+    (Versão corrigida para tratar NaNs antes do PCA)
     """
 
     etapa = "ETAPA 6 - Mineração de Dados"
     log_mensagem(etapa, "Executando PCA e agrupamento (K-Means)...", "inicio")
 
+    df_original = df # Preserva o DataFrame original
+    
     # ============================================================
     # 1) Seleção de colunas numéricas válidas
     # ------------------------------------------------------------
@@ -45,61 +44,82 @@ def minerar_dados(df: pd.DataFrame):
     if df_numerico.empty:
         raise ValueError("[ERRO] Nenhuma variável numérica disponível para mineração de dados.")
 
-    # ============================================================
-    # 2) Padronização dos dados
-    # ------------------------------------------------------------
-    # Os dados são normalizados (média = 0, desvio = 1) para evitar
-    # distorções provocadas por escalas diferentes.
-    # ============================================================
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(df_numerico)
+    # ####################################################################
+    # ### INÍCIO DA CORREÇÃO (Tratamento de NaNs) ###
+    # ####################################################################
 
     # ============================================================
-    # 3) Aplicação do PCA (Análise de Componentes Principais)
+    # 2) Identificar linhas com dados numéricos completos
     # ------------------------------------------------------------
-    # Reduz a dimensionalidade mantendo a variância essencial.
+    # O PCA não aceita NaNs. Vamos rodar a mineração apenas
+    # nos registros que estão 100% completos.
     # ============================================================
+    
+    # Guarda o índice das linhas que NÃO têm NaNs
+    idx_completos = df_numerico.dropna().index
+    df_numerico_completo = df_numerico.loc[idx_completos]
+    
+    n_total = len(df_numerico)
+    n_completos = len(df_numerico_completo)
+    n_removidos = n_total - n_completos
+    
+    if n_completos == 0:
+        raise ValueError("[ERRO] Nenhum registro completo (sem NaNs) encontrado para o PCA. Verifique a Etapa 5.")
+        
+    log_mensagem(etapa, f"Mineração usará {n_completos} de {n_total} registros (removendo {n_removidos} com NaNs).", "info")
+
+
+    # ============================================================
+    # 3) Padronização dos dados (APENAS nos dados completos)
+    # ------------------------------------------------------------
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(df_numerico_completo)
+
+    # ============================================================
+    # 4) Aplicação do PCA (Análise de Componentes Principais)
+    # ------------------------------------------------------------
     pca = PCA(n_components=2, random_state=42)
-    X_pca = pca.fit_transform(X_scaled)
+    X_pca = pca.fit_transform(X_scaled) # Agora X_scaled não tem NaNs
     variancia = np.sum(pca.explained_variance_ratio_) * 100
 
     # ============================================================
-    # 4) Agrupamento com K-Means
+    # 5) Agrupamento com K-Means
     # ------------------------------------------------------------
-    # Define automaticamente 3 clusters (configurável).
-    # ============================================================
     modelo_kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
     clusters = modelo_kmeans.fit_predict(X_pca)
 
     # ============================================================
-    # 5) Geração das novas colunas (sem fragmentação)
+    # 6) Geração das novas colunas (alocação segura)
     # ------------------------------------------------------------
-    # Usa concatenação única para evitar PerformanceWarning.
+    # Criamos as colunas com NaN no DataFrame original...
+    # ... e preenchemos apenas os índices que foram processados.
     # ============================================================
-    novas_colunas = pd.DataFrame({
-        "pca1": X_pca[:, 0],
-        "pca2": X_pca[:, 1],
-        "cluster": clusters
-    }, index=df.index)
+    
+    # Criar colunas vazias (com NaN)
+    df_original["pca1"] = np.nan
+    df_original["pca2"] = np.nan
+    df_original["cluster"] = np.nan
 
-    df_final = pd.concat([df.reset_index(drop=True), novas_colunas.reset_index(drop=True)], axis=1)
+    # Preencher apenas as linhas que tinham dados completos
+    df_original.loc[idx_completos, "pca1"] = X_pca[:, 0]
+    df_original.loc[idx_completos, "pca2"] = X_pca[:, 1]
+    df_original.loc[idx_completos, "cluster"] = clusters
+
+    # ####################################################################
+    # ### FIM DA CORREÇÃO ###
+    # ####################################################################
 
     # ============================================================
-    # 6) Registro e saída
+    # 7) Registro e saída
     # ------------------------------------------------------------
-    # Exibe informações no log sobre a variância explicada e
-    # o número de docentes agrupados.
-    # ============================================================
     log_mensagem(
         etapa,
-        f"Mineração concluída. {len(df_final)} docentes agrupados em 3 clusters. "
+        f"Mineração concluída. {n_completos} docentes agrupados em 3 clusters. "
         f"Variância explicada pelos 2 primeiros componentes: {variancia:.2f}%",
         "fim"
     )
 
     # ============================================================
-    # 7) Retorno final
+    # 8) Retorno final
     # ------------------------------------------------------------
-    # Retorna somente dois elementos, conforme padrão do pipeline.
-    # ============================================================
-    return df_final, modelo_kmeans
+    return df_original, modelo_kmeans

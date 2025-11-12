@@ -1,13 +1,14 @@
 # ==========================================================
 # ETAPA PRINCIPAL – PIPELINE GERAL DE ANÁLISE (PISA 2018)
 # ==========================================================
-# Projeto: Bem-Estar Docente no Chile
-# Autor(es): Prof. Kleber, Profª. Crsitiane e Profª. Mariah
-# Descrição: Execução sequencial das 10 etapas do processo KDD
-#            + (opcional) Etapa 11: Relatório automatizado com LLM (GROQ ou GOOGLE)
+# (MODIFICADO) Adiciona 'dotenv' para carregar as chaves de API
+# do arquivo .env antes que a Etapa 11 seja importada.
 # ==========================================================
 
 import os
+from dotenv import load_dotenv # Carrega o .env
+load_dotenv() # Executa o carregamento
+
 import argparse
 import logging
 from datetime import datetime
@@ -91,8 +92,17 @@ def main():
         # ==================================================
         # ETAPA 3 – COLETA DE DADOS (PISA 2018)
         # ==================================================
-        respostas, questionario = coletar_dados(cenario)
-        logging.info(f"PIPELINE GERAL - Coleta concluída: respostas={respostas.shape}, questionário={questionario.shape})")
+        respostas, questionario = coletar_dados(cenario) # <--- Variável é 'questionario'
+        
+        # ########################################################
+        # # ### INÍCIO DA CORREÇÃO ###
+        # ########################################################
+        # Corrigido: 'questionário' (com acento) -> 'questionario' (sem acento)
+        logging.info(f"PIPELINE GERAL - Coleta concluída: respostas={respostas.shape}, questionario={questionario.shape})")
+        # ########################################################
+        # # ### FIM DA CORREÇÃO ###
+        # ########################################################
+
 
         # ==================================================
         # ETAPA 4 – PRÉ-PROCESSAMENTO (LIMPEZA E TRATAMENTO)

@@ -1,7 +1,9 @@
-# ETAPA 08 – INTERPRETACAO E VISUALIZACAO
-# - Gera graficos e tabelas com conversoes explicitas para float
-# - Evita avisos do Matplotlib sobre "categorical units"
-# - Mantém compatibilidade com main.py (função gerar_graficos)
+# ============================================================
+# ETAPA 08 – INTERPRETACAO E VISUALIZACAO (VERSÃO CORRIGIDA)
+# ------------------------------------------------------------
+# - (CORRIGIDO) Atualiza a função _alvo para encontrar
+#   o novo índice 'indice_autoeficacia_norm' criado na Etapa 5.
+# ============================================================
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -25,11 +27,32 @@ def _num(s: pd.Series) -> pd.Series:
     """Converte Series para numerico com NaN em valores invalidos."""
     return pd.to_numeric(s, errors="coerce")
 
+# ####################################################################
+# ### INÍCIO DA CORREÇÃO ###
+# ####################################################################
 def _alvo(df: pd.DataFrame) -> str:
-    for c in ["indice_bem_estar_norm", "ibd", "indice_bem_estar"]:
+    """
+    Localiza a variável alvo (Y) para gerar os gráficos.
+    Priorizamos o novo índice de autoeficácia.
+    """
+    # Lista de prioridade, começando com o novo alvo (autoeficácia)
+    alvos_preferidos = [
+        "indice_autoeficacia_norm", # Nosso novo alvo, normalizado
+        "indice_autoeficacia",      # Nosso novo alvo, bruto
+        "indice_bem_estar_norm",    # Antigo (fallback)
+        "ibd",                      # Antigo (fallback)
+        "indice_bem_estar"          # Antigo (fallback)
+    ]
+    for c in alvos_preferidos:
         if c in df.columns:
             return c
-    raise ValueError("Nao foi possivel localizar a coluna do indice de bem-estar.")
+    
+    # Mensagem de erro atualizada
+    raise ValueError("Nao foi possivel localizar a coluna do indice (ex: 'indice_autoeficacia_norm').")
+# ####################################################################
+# ### FIM DA CORREÇÃO ###
+# ####################################################################
+
 
 def _salvar_tabela(df: pd.DataFrame, caminho: str):
     df.to_csv(caminho, index=False, encoding="utf-8-sig")
@@ -42,30 +65,40 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
     log_mensagem(etapa, "Iniciando geração de gráficos e tabelas...", "inicio")
     _garantir_pastas()
 
+    # Agora a função _alvo() encontrará "indice_autoeficacia_norm"
     alvo = _alvo(respostas)
     df = respostas.copy()
+    
+    log_mensagem(etapa, f"Gerando gráficos para a variável alvo: '{alvo}'", "info")
+
 
     # ———————————— Histograma e Densidade do índice ————————————
     try:
         bem = _num(df[alvo]).dropna()
+        
+        # Mudar os títulos dos gráficos para o novo alvo
+        titulo_grafico = f"Distribuição do '{alvo}'"
+        xlabel_grafico = f"Índice ({alvo})"
 
         plt.figure(figsize=(8, 4))
         plt.hist(bem.values, bins=30)
-        plt.title("Distribuição do índice de bem-estar")
-        plt.xlabel("Índice"); plt.ylabel("Frequência")
-        plt.tight_layout(); plt.savefig("resultados/figuras/histograma_bem_estar.png"); plt.close()
-        log_mensagem(etapa, "Histograma do índice de bem-estar salvo.", "info")
+        plt.title(titulo_grafico)
+        plt.xlabel(xlabel_grafico); plt.ylabel("Frequência")
+        plt.tight_layout(); plt.savefig(f"resultados/figuras/histograma_{alvo}.png"); plt.close()
+        log_mensagem(etapa, f"Histograma '{alvo}' salvo.", "info")
 
         plt.figure(figsize=(8, 4))
         bem.plot(kind="kde")
-        plt.title("Densidade do índice de bem-estar")
-        plt.xlabel("Índice")
-        plt.tight_layout(); plt.savefig("resultados/figuras/densidade_bem_estar.png"); plt.close()
-        log_mensagem(etapa, "Gráfico de densidade do índice de bem-estar salvo.", "info")
-    except Exception:
+        plt.title(f"Densidade do '{alvo}'")
+        plt.xlabel(xlabel_grafico)
+        plt.tight_layout(); plt.savefig(f"resultados/figuras/densidade_{alvo}.png"); plt.close()
+        log_mensagem(etapa, f"Gráfico de densidade '{alvo}' salvo.", "info")
+    except Exception as e:
+        log_mensagem(etapa, f"Falha ao gerar histograma/densidade: {e}", "aviso")
         pass
 
     # ———————————— Barras por faixa e contagens ————————————
+    # (Esta seção será pulada, pois removemos 'faixa_bem_estar' na Etapa 5)
     try:
         if "faixa_bem_estar" in df.columns:
             cont = df["faixa_bem_estar"].value_counts(dropna=False).sort_index()
@@ -76,14 +109,15 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
             plt.figure(figsize=(7, 4))
             plt.bar(x, cont.values)
             plt.xticks(x, cont.index.astype(str))
-            plt.title("Distribuição por faixa de bem-estar")
+            plt.title("Distribuição por faixa")
             plt.xlabel("Faixa"); plt.ylabel("Quantidade")
-            plt.tight_layout(); plt.savefig("resultados/figuras/barras_faixa_bem_estar.png"); plt.close()
+            plt.tight_layout(); plt.savefig("resultados/figuras/barras_faixa.png"); plt.close()
             log_mensagem(etapa, "Barras por faixa e tabela de contagens salvas.", "info")
     except Exception:
         pass
 
     # ———————————— PCA por cluster (se existir) ————————————
+    # (Sem alterações)
     try:
         if {"PCA1", "PCA2"}.issubset(df.columns):
             x = _num(df["PCA1"]).values
@@ -106,6 +140,7 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
         pass
 
     # ———————————— Distribuição de clusters (barras) ————————————
+    # (Sem alterações)
     try:
         if "cluster" in df.columns:
             contc = pd.Series(df["cluster"]).value_counts(dropna=False).sort_index()
@@ -125,17 +160,16 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
         pass
 
     # ———————————— Mapa de calor de correlações ————————————
+    # (Sem alterações)
     try:
         num_df = df.select_dtypes(include=["number"]).copy()
         num_df = num_df.apply(pd.to_numeric, errors="coerce")
         corr = num_df.corr()
 
-        # Cria a figura maior e ajusta a densidade
-        plt.figure(figsize=(20, 16))  # 🔹 tamanho ampliado
+        plt.figure(figsize=(20, 16))
         im = plt.imshow(corr.values, aspect="auto", cmap="viridis")
         plt.colorbar(im, fraction=0.046, pad=0.04)
 
-        # 🔹 Define os rótulos e aplica rotação e ajuste fino
         plt.xticks(
             range(len(corr.columns)),
             corr.columns,
@@ -154,7 +188,6 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
         plt.savefig("resultados/figuras/mapa_calor_correlacoes.png", dpi=300, bbox_inches="tight")
         plt.close()
 
-        # 🔹 Salva também a matriz de correlações em CSV
         _salvar_tabela(
             corr.reset_index().rename(columns={"index": "variavel"}),
             "resultados/tabelas/correlacoes.csv"
@@ -164,6 +197,7 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
 
     except Exception as e:
         log_mensagem(etapa, f"Falha ao gerar mapa de calor: {e}", "erro")
+        
     # ———————————— Boxplot por cluster ————————————
     try:
         if "cluster" in df.columns:
@@ -176,8 +210,8 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
                 ticks=range(1, len(grupos) + 1),
                 labels=[f"Cluster {k}" for k in sorted(pd.Series(df["cluster"]).dropna().unique())]
             )
-            plt.title("Índice de bem-estar por cluster")
-            plt.ylabel("Índice")
+            plt.title(f"Índice '{alvo}' por cluster")
+            plt.ylabel(f"Índice ({alvo})")
             plt.tight_layout(); plt.savefig("resultados/figuras/boxplot_cluster.png"); plt.close()
             log_mensagem(etapa, "Boxplot por cluster salvo.", "info")
     except Exception:
@@ -185,22 +219,25 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
 
     # ———————————— Estatísticas descritivas do índice ————————————
     try:
-        stats = _num(df[alvo]).describe().to_frame(name="indice_bem_estar")
+        stats = _num(df[alvo]).describe().to_frame(name=alvo)
         _salvar_tabela(stats.reset_index().rename(columns={"index": "estatistica"}),
-                       "resultados/tabelas/estatisticas_bem_estar.csv")
+                       f"resultados/tabelas/estatisticas_{alvo}.csv")
         log_mensagem(etapa, "Tabela de estatísticas descritivas salva.", "info")
     except Exception:
         pass
 
     # ———————————— Relatório visual resumido ————————————
+    # (Atualizado para refletir os novos nomes de arquivo)
     try:
         resumo = [
             "# Resumo visual do estudo",
             "",
+            f"## Alvo da Análise: {alvo}",
+            "",
             "## Gráficos gerados",
-            "- `figuras/histograma_bem_estar.png`",
-            "- `figuras/densidade_bem_estar.png`",
-            "- `figuras/barras_faixa_bem_estar.png` (se houver `faixa_bem_estar`)",
+            f"- `figuras/histograma_{alvo}.png`",
+            f"- `figuras/densidade_{alvo}.png`",
+            "- `figuras/barras_faixa.png` (se houver `faixa_bem_estar`)",
             "- `figuras/pca_clusters.png` (se houver `PCA1` e `PCA2`)",
             "- `figuras/clusters_distribuicao.png` (se houver `cluster`)",
             "- `figuras/mapa_calor_correlacoes.png`",
@@ -210,7 +247,7 @@ def gerar_visualizacoes(respostas: pd.DataFrame):
             "- `tabelas/contagem_faixas_bem_estar.csv`",
             "- `tabelas/distribuicao_clusters.csv`",
             "- `tabelas/correlacoes.csv`",
-            "- `tabelas/estatisticas_bem_estar.csv`",
+            f"- `tabelas/estatisticas_{alvo}.csv`",
         ]
         Path("resultados/relatorios/resumo_visual.md").write_text("\n".join(resumo), encoding="utf-8")
         log_mensagem(etapa, "Relatório visual resumido salvo em resultados/relatorios/resumo_visual.md", "info")

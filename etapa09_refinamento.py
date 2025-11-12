@@ -1,115 +1,157 @@
 # ============================================================
-# ETAPA 09 - REFINAMENTO DO CONHECIMENTO
+# ETAPA 09 - REFINAMENTO DO CONHECIMENTO (VERSÃO MODIFICADA)
 # ------------------------------------------------------------
-# Objetivo:
-#   - Analisar o modelo OLS estimado na Etapa 07;
-#   - Identificar variáveis estatisticamente significativas (p < 0.05);
-#   - Reavaliar a hipótese inicial à luz dos resultados empíricos;
-#   - Gerar síntese interpretativa para subsidiar políticas públicas.
-#
-# Entradas:
-#   - modelo_ols: objeto statsmodels.OLS ajustado (Etapa 07)
-#
-# Saídas:
-#   - DataFrame com variáveis significativas
-#   - Relatório salvo em resultados/tabelas/variaveis_significativas.csv
+# - (MODIFICADO) No Passo 6, adiciona a média da variável alvo
+#   (ex: 0.981) ao arquivo 'melhor_modelo.json' para ser
+#   usado pela Etapa 11.
 # ============================================================
 
 import logging
 import pandas as pd
 import os
+import json
+import joblib
+from pathlib import Path
 
 # ==========================================================
 # FUNÇÃO PRINCIPAL – REFINAMENTO DO CONHECIMENTO
 # ==========================================================
 def refinar_conhecimento(modelo_ols, respostas=None):
     """
-    Refina o modelo ajustado na etapa anterior, avaliando:
-    - Variáveis significativas (p-valor ≤ 0.05)
-    - Coeficientes relevantes
-    - Ajuste da hipótese com base nos achados empíricos
-    - (Opcional) Geração de estatísticas complementares a partir do DataFrame original
-
-    Parâmetros
-    ----------
-    modelo_ols : statsmodels.regression.linear_model.RegressionResultsWrapper
-        Modelo OLS ajustado na Etapa 7.
-    respostas : pandas.DataFrame, opcional
-        Conjunto de dados transformados (utilizado para análises adicionais).
-    
-    Retorna
-    -------
-    variaveis_significativas : list
-        Lista com os nomes das variáveis estatisticamente significativas.
+    Refina o conhecimento com base no MELHOR modelo da Etapa 7.
+    - Se OLS: usa p-valores.
+    - Se RF/GB: usa feature_importances_.
     """
 
-    logging.info("ETAPA 9 - Refinamento do Conhecimento) - Avaliando significância e ajustando hipótese...")
+    etapa = "ETAPA 9 - Refinamento do Conhecimento"
+    logging.info(f"({etapa}) - Avaliando significância/importância...")
 
     try:
         # ======================================================
-        # 1. Extração dos resultados do modelo OLS
+        # 1. Carregar os metadados do melhor modelo
         # ======================================================
-        resultados = pd.DataFrame({
-            "Variável": modelo_ols.params.index,
-            "Coeficiente": modelo_ols.params.values,
-            "P-valor": modelo_ols.pvalues.values,
-            "Erro Padrão": modelo_ols.bse.values
-        })
+        caminho_json = Path("resultados/tabelas/melhor_modelo.json")
+        if not caminho_json.exists():
+            raise FileNotFoundError("Arquivo 'melhor_modelo.json' não encontrado. Execute a Etapa 7.")
+        
+        with open(caminho_json, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+            
+        melhor_modelo_nome = meta.get("melhor_modelo")
+        features = meta.get("features", [])
+        caminho_modelo_salvo = meta.get("caminho_modelo_salvo")
+
+        logging.info(f"({etapa}) - Modelo vencedor identificado: {melhor_modelo_nome}")
 
         # ======================================================
-        # 2. Identificação das variáveis significativas
+        # 2. Extração dos resultados (lógica baseada no modelo)
         # ======================================================
-        variaveis_significativas = resultados.loc[resultados["P-valor"] <= 0.05, "Variável"].tolist()
+        
+        resultados_df = pd.DataFrame()
+        variaveis_relevantes = []
+
+        if melhor_modelo_nome in ["RandomForestRegressor", "GradientBoostingRegressor"]:
+            # --- LÓGICA NOVA: Usar Feature Importance ---
+            if not caminho_modelo_salvo or not Path(caminho_modelo_salvo).exists():
+                raise FileNotFoundError(f"Arquivo do modelo '{caminho_modelo_salvo}' não encontrado.")
+
+            modelo_nao_linear = joblib.load(caminho_modelo_salvo)
+            importancias = modelo_nao_linear.feature_importances_
+
+            resultados_df = pd.DataFrame({
+                "Variável": features,
+                "Importancia": importancias
+            }).sort_values(by="Importancia", ascending=False)
+            
+            # Define "relevante" como variável com importância > 0.01 (1%)
+            variaveis_relevantes = resultados_df[resultados_df["Importancia"] > 0.01]["Variável"].tolist()
+            logging.info(f"({etapa}) - Análise de Feature Importance (do {melhor_modelo_nome}) concluída.")
+
+        else:
+            # --- LÓGICA ANTIGA: Usar P-Valor do OLS ---
+            if modelo_ols is None:
+                raise ValueError("Modelo OLS é 'None', mas foi selecionado como o melhor.")
+                
+            resultados_df = pd.DataFrame({
+                "Variável": modelo_ols.params.index,
+                "Coeficiente": modelo_ols.params.values,
+                "P-valor": modelo_ols.pvalues.values,
+                "Erro Padrão": modelo_ols.bse.values
+            })
+            
+            resultados_df = resultados_df[~resultados_df["Variável"].str.contains('Intercept|const', case=False)]
+            variaveis_relevantes = resultados_df.loc[resultados_df["P-valor"] <= 0.05, "Variável"].tolist()
+            logging.info(f"({etapa}) - Análise de P-Valor (do OLS) concluída.")
+
 
         # ======================================================
-        # 3. Criação da pasta de resultados (se necessário)
+        # 3. Criação da pasta de resultados
         # ======================================================
         os.makedirs("resultados/tabelas", exist_ok=True)
 
         # ======================================================
         # 4. Salvamento dos resultados em CSV
         # ======================================================
-        caminho_csv = "resultados/tabelas/variaveis_significativas.csv"
-        resultados.to_csv(caminho_csv, index=False, encoding="utf-8-sig")
-
-        logging.info(f"ETAPA 9 - Refinamento do Conhecimento) - Relatório salvo em '{caminho_csv}'.")
+        if "Importancia" in resultados_df.columns:
+            caminho_csv = "resultados/tabelas/variaveis_importancia_rf.csv"
+        else:
+            caminho_csv = "resultados/tabelas/variaveis_significativas_ols.csv"
+            
+        resultados_df.to_csv(caminho_csv, index=False, encoding="utf-8-sig")
+        logging.info(f"({etapa}) - Relatório de variáveis salvo em '{caminho_csv}'.")
 
         # ======================================================
         # 5. Relatório interpretativo
         # ======================================================
-        logging.info(
-            f"ETAPA 9 - Refinamento do Conhecimento) - Variáveis significativas identificadas: {variaveis_significativas}"
-        )
+        if not variaveis_relevantes:
+             logging.warning(f"({etapa}) - Nenhuma variável relevante/significativa encontrada (critério > 0.01 ou p < 0.05).")
+        else:
+            logging.info(
+                f"({etapa}) - Variáveis relevantes identificadas: {variaveis_relevantes}"
+            )
 
         # ======================================================
-        # 6. (Opcional) Análises complementares com o DataFrame
+        # 6. (Opcional) Análises complementares (MODIFICADO)
         # ======================================================
         if respostas is not None:
             try:
-                # Exemplo: cálculo da média do índice de bem-estar
-                if "indice_bem_estar" in respostas.columns:
-                    media_bem_estar = respostas["indice_bem_estar"].mean()
+                alvo = meta.get("alvo", "indice_autoeficacia_norm")
+                if alvo in respostas.columns:
+                    media_alvo = respostas[alvo].mean(skipna=True)
+                    n_validos = int(respostas[alvo].notna().sum())
+                    
                     logging.info(
-                        f"ETAPA 9 - Refinamento do Conhecimento) - Média geral do índice de bem-estar docente: {media_bem_estar:.3f}"
+                        f"({etapa}) - Média geral do índice alvo ({alvo}): {media_alvo:.3f} (N={n_validos})"
                     )
 
-                # Outras análises complementares podem ser incluídas aqui
-                # como correlações adicionais, distribuição por cluster, etc.
+                    # ########################################################
+                    # # ### INÍCIO DA MODIFICAÇÃO (Adicionar ao JSON) ###
+                    # ########################################################
+                    # Adiciona a média ao JSON para a Etapa 11
+                    meta['alvo_media'] = media_alvo
+                    meta['alvo_n_validos'] = n_validos
+                    
+                    with open(caminho_json, 'w', encoding='utf-8') as f:
+                        json.dump(meta, f, indent=2, ensure_ascii=False)
+                        
+                    logging.info(f"({etapa}) - Média do alvo adicionada ao '{caminho_json.name}'.")
+                    # ########################################################
+                    # # ### FIM DA MODIFICAÇÃO ###
+                    # ########################################################
 
             except Exception as e:
-                logging.warning(f"ETAPA 9 - Análise complementar ignorada: {e}")
+                logging.warning(f"({etapa}) - Análise complementar ignorada: {e}")
 
         # ======================================================
         # 7. Retorno final
         # ======================================================
         logging.info(
-            f"ETAPA 9 - Refinamento do Conhecimento) - Relatório interpretativo gerado com sucesso."
+            f"({etapa}) - Refinamento concluído com sucesso."
         )
-        return variaveis_significativas
+        return variaveis_relevantes
 
     except Exception as e:
         logging.error(
-            f"[ERRO FATAL] Falha na Etapa 9 - Refinamento do Conhecimento: {e}", exc_info=True
+            f"[ERRO FATAL] Falha na Etapa 9 - Refinamento: {e}", exc_info=True
         )
         raise
-

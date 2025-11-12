@@ -1,240 +1,382 @@
 # ============================================================
-# ETAPA 11 - RELATÓRIO AUTOMATIZADO COM LLM (GROQ | GOOGLE)
+# ETAPA 11 – RELATÓRIO AUTOMÁTICO COM LLM (VERSÃO FINAL)
 # ------------------------------------------------------------
-# Objetivo:
-#   - Ler os resultados consolidados (CSV's e contexto) das etapas 5 a 10;
-#   - Montar um prompt com visão executiva e técnica;
-#   - Chamar um LLM (Groq OU Google) e salvar o relatório em texto/markdown.
-#
-# Entradas:
-#   - Arquivos gerados nas etapas anteriores (ex.: resultados/tabelas/*.csv)
-#   - Variáveis de ambiente no .env:
-#       GROQ_API_KEY        -> para provider = "groq"
-#       GOOGLE_API_KEY      -> para provider = "google"
-#       LLM_MODEL (opcional)-> ex.: "llama-3.3-70b" ou "gemini-2.5-flash"
-#
-# Saídas:
-#   - resultados/relatorio_llm.md  (relatório consolidado)
+# - (MODIFICADO) _selecionar_provedor_modelo: Corrige os nomes
+#   padrão dos modelos para 'gemini-2.5-flash' (Google) e
+#   'llama-3.3-70b-versatile' (Groq), conforme especificado.
+# - (MODIFICADO) _executar_geracao: Também atualiza o nome
+#   padrão do modelo Groq.
 # ============================================================
 
 import os
+import json
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
+from datetime import datetime
 import pandas as pd
 
-# Carrega .env (caso exista)
-load_dotenv()
-
-# ===== Imports opcionais conforme provider =====
-# (Importamos dentro das funções para não criar dependência dura quando o provider não é usado.)
-
-# ============================================================
-# Utilidades internas
-# ============================================================
-
-def _ler_conteudos_para_prompt() -> str:
-    """Carrega os principais artefatos em texto para embutir no prompt."""
-    partes = []
-
-    # (1) Variáveis significativas (Etapa 9)
-    var_sig = Path("resultados/tabelas/variaveis_significativas.csv")
-    if var_sig.exists():
-        try:
-            df = pd.read_csv(var_sig)
-            partes.append("### Variáveis significativas (topo do CSV)\n")
-            partes.append(df.head(30).to_string(index=False))
-        except Exception as e:
-            partes.append(f"(Falha ao ler {var_sig}: {e})")
-    else:
-        partes.append("(Arquivo de variáveis significativas não encontrado.)")
-
-    # (2) Resultados OLS (Etapa 7)
-    ols = Path("resultados/tabelas/modelo_ols_resultados.csv")
-    if ols.exists():
-        try:
-            df = pd.read_csv(ols)
-            partes.append("\n\n### Resultados OLS (amostra das 20 primeiras linhas)\n")
-            partes.append(df.head(20).to_string(index=False))
-        except Exception as e:
-            partes.append(f"(Falha ao ler {ols}: {e})")
-    else:
-        partes.append("\n(Arquivo de resultados OLS não encontrado.)")
-
-    # (3) Comparação de modelos (Etapa 7 – seleção automática)
-    comp = Path("resultados/tabelas/comparacao_modelos.csv")
-    meta = Path("resultados/tabelas/melhor_modelo.json")
-    if comp.exists() and meta.exists():
-        try:
-            dfc = pd.read_csv(comp)
-            meta_json = json.loads(meta.read_text(encoding="utf-8"))
-            partes.append("\n\n### Comparação de Modelos (ranking)\n")
-            # ordena para facilitar a leitura: R2_CV desc, RMSE asc, R2_aj desc, AIC asc
-            dfc["__r2cv"] = dfc["R2_CV"].fillna(-1e9)
-            dfc["__rmse"] = dfc["RMSE_CV"].fillna(1e9)
-            dfc["__r2aj"] = dfc["R2_ajustado"].fillna(-1e9)
-            dfc["__aic"]  = dfc["AIC"].fillna(1e9)
-            dfc = dfc.sort_values(by=["__r2cv","__rmse","__r2aj","__aic"], ascending=[False,True,False,True])
-            partes.append(dfc[["modelo","R2_CV","RMSE_CV","R2_ajustado","AIC","BIC","notas"]].head(6).to_string(index=False))
-
-            partes.append("\n\n### Modelo selecionado automaticamente\n")
-            partes.append(f"Melhor modelo: {meta_json.get('melhor_modelo')}")
-            partes.append(f"Critério: {meta_json.get('criterio')}")
-            partes.append(f"Alvo: {meta_json.get('alvo')}")
-            partes.append(f"Total de variáveis: {len(meta_json.get('features', []))}")
-            partes.append("\n(Justifique no texto: o modelo foi escolhido por apresentar melhor desempenho segundo o critério acima.)")
-        except Exception as e:
-            partes.append(f"(Falha ao ler comparação/metadata da Etapa 7: {e})")
-    else:
-        partes.append("\n(Arquivos de comparação de modelos não encontrados.)")
-
-    return "\n".join(partes)
-
-
-def _montar_prompt_base(cenario: dict | None = None) -> str:
-    """Cria um prompt consistente para geração do relatório."""
-    contexto = _ler_conteudos_para_prompt()
-    cabecalho = (
-        "Você é um analista de políticas educacionais. "
-        "Gere um relatório executivo e técnico, claro e objetivo, "
-        "sobre o bem-estar docente de Matemática no Chile, a partir dos resultados abaixo. "
-        "Organize em: Introdução, Dados e Método, Principais Evidências, Implicações, "
-        "Recomendações de Política Pública (de curto, médio e longo prazo), Limitações e Próximos Passos.\n"
-    )
-    if cenario:
-        cabecalho += f"\nCenário: {cenario}\n"
-    cabecalho += "\n=== Evidências e Resultados ===\n"
-    return cabecalho + contexto
-
-
-def _salvar_relatorio(texto: str, caminho: Path = Path("resultados/relatorio_llm.md")) -> Path:
-    caminho.parent.mkdir(parents=True, exist_ok=True)
-    caminho.write_text(texto, encoding="utf-8")
-    return caminho
-
-# ============================================================
-# Provedor: GOOGLE (Gemini) – Caminho idêntico ao seu teste
-# ============================================================
-
-def _gerar_google(model_name: str | None, prompt: str) -> str:
-    """
-    Implementação com google-generativeai idêntica ao seu teste mínimo:
-      - lê GOOGLE_API_KEY
-      - genai.configure(api_key=...)
-      - model = genai.GenerativeModel("gemini-2.5-flash")
-      - response = model.generate_content(prompt)
-      - return response.text
-    """
-    import google.generativeai as genai
-    from dotenv import load_dotenv
-    import os
-
-    # 1) Carrega .env (já feito no topo, mas é idempotente)
-    load_dotenv()
-
-    # 2) Obtém a chave
-    api_key = os.getenv("GOOGLE_API_KEY")
-
-    # 3) Verificação crítica
-    if not api_key:
-        raise RuntimeError(
-            "A variável de ambiente GOOGLE_API_KEY não foi encontrada. "
-            "Verifique seu arquivo .env."
-        )
-
-    # 4) Configura o SDK
-    genai.configure(api_key=api_key)
-
-    # 5) Modelo
-    # Se não foi passado por argumento/ambiente, usamos o mesmo do seu teste:
-    model_name = model_name or os.getenv("LLM_MODEL") or "gemini-2.5-flash"
-
-    # 6) Chamada
-    model = genai.GenerativeModel(model_name)
-    try:
-        response = model.generate_content(prompt)
-        # Em chamadas bem-sucedidas, o conteúdo vem em response.text
-        texto = getattr(response, "text", None) or ""
-        return texto.strip()
-    except Exception as e:
-        # Propaga a exceção com mensagem clara
-        raise RuntimeError(f"Falha na chamada ao Google Generative AI: {e}")
-
-# ============================================================
-# Provedor: GROQ (Llama)
-# ============================================================
-
-def _gerar_groq(model_name: str | None, prompt: str) -> str:
-    """
-    Implementação com groq: usa GROQ_API_KEY e chat.completions.create.
-    """
+# Provedores de LLM
+try:
     from groq import Groq
-    from dotenv import load_dotenv
-    import os
+    GROQ_DISPONIVEL = True
+except ImportError:
+    GROQ_DISPONIVEL = False
 
-    load_dotenv()
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "A variável de ambiente GROQ_API_KEY não foi encontrada. "
-            "Verifique seu arquivo .env."
-        )
+try:
+    import google.generativeai as genai
+    GOOGLE_DISPONIVEL = True
+except ImportError:
+    GOOGLE_DISPONIVEL = False
 
-    client = Groq(api_key=api_key)
-    model_name = model_name or os.getenv("LLM_MODEL") or "llama-3.3-70b-versatile"
+# ============================================================
+# FUNÇÕES AUXILIARES: COLETA E FORMATAÇÃO DE ARTEFATOS
+# (Esta seção inteira não foi alterada)
+# ============================================================
 
+def _coletar_artefatos() -> dict:
+    artefatos = {}
+    base_path = Path("resultados")
+
+    # 1. Metadados do Modelo
     try:
-        resp = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "Você é um analista de políticas educacionais."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            max_tokens=1800,
-        )
-        texto = resp.choices[0].message.content if resp and resp.choices else ""
-        return (texto or "").strip()
+        with open(base_path / "tabelas/melhor_modelo.json", "r", encoding="utf-8") as f:
+            meta = json.load(f)
+            artefatos['melhor_modelo_meta'] = meta
+            artefatos['alvo'] = meta.get('alvo')
+            artefatos['alvo_media'] = meta.get('alvo_media')
+            artefatos['alvo_n_validos'] = meta.get('alvo_n_validos')
     except Exception as e:
-        raise RuntimeError(f"Falha na chamada ao Groq: {e}")
+        logging.warning(f"Artefato 'melhor_modelo.json' não encontrado: {e}")
+        artefatos['melhor_modelo_meta'] = {"erro": str(e)}
+
+    # 2. Comparação de Todos os Modelos
+    try:
+        artefatos['comparacao_modelos_csv'] = pd.read_csv(
+            base_path / "tabelas/comparacao_modelos.csv"
+        ).to_string(index=False)
+    except Exception as e:
+        logging.warning(f"Artefato 'comparacao_modelos.csv' não encontrado: {e}")
+
+    # 3. Variáveis Relevantes
+    try:
+        p_rf = base_path / "tabelas/variaveis_importancia_rf.csv"
+        p_ols = base_path / "tabelas/variaveis_significativas_ols.csv"
+        if p_rf.exists():
+            artefatos['variaveis_relevantes_csv'] = pd.read_csv(p_rf).to_string(index=False)
+        elif p_ols.exists():
+            artefatos['variaveis_relevantes_csv'] = pd.read_csv(p_ols).to_string(index=False)
+        else:
+            raise FileNotFoundError("Nenhum CSV de variáveis relevantes/importantes encontrado.")
+    except Exception as e:
+        logging.warning(f"Artefato de variáveis relevantes não encontrado: {e}")
+
+    # 4. Recomendações brutas
+    try:
+        artefatos['recomendacoes_txt'] = (
+            base_path / "textos/recomendacoes_politicas_publicas.txt"
+        ).read_text(encoding="utf-8")
+    except Exception as e:
+        logging.warning(f"Artefato 'recomendacoes_politicas_publicas.txt' não encontrado: {e}")
+
+    # 5. Matriz de Correlação
+    try:
+        df_corr = pd.read_csv(base_path / "tabelas/correlacoes.csv")
+        if len(df_corr) > 15:
+            principais = [artefatos['alvo']] + artefatos['melhor_modelo_meta'].get('features', [])
+            principais = [c for c in principais if c in df_corr.columns][:15]
+            df_corr = df_corr.set_index('variavel').loc[principais, principais].reset_index()
+        artefatos['correlacoes_csv'] = df_corr.to_string(index=False)
+    except Exception as e:
+        logging.warning(f"Artefato 'correlacoes.csv' não encontrado ou falha ao filtrar: {e}")
+
+    # 6. Composição dos Índices
+    try:
+        caminho_composicao = base_path / "tabelas/composicao_indices.json"
+        with open(caminho_composicao, "r", encoding="utf-8") as f:
+            artefatos['composicao_indices'] = json.load(f)
+    except Exception as e:
+        logging.warning(f"Artefato 'composicao_indices.json' não encontrado: {e}")
+
+    return artefatos
+
+def _gerar_prompt_sistema() -> str:
+    """Define a persona e a missão do LLM."""
+    return """
+Você é um Analista de Dados Educacionais Sênior, especializado em interpretar
+modelos estatísticos (como OLS e Random Forest) e dados da pesquisa PISA.
+
+Sua missão é gerar um relatório executivo completo em português do Brasil,
+baseado nos artefatos quantitativos fornecidos (JSONs, CSVs).
+
+O relatório deve:
+1.  Ser estruturado em Markdown (usando #, ##, ###, *).
+2.  Ser técnico, mas acessível a gestores de políticas públicas.
+3.  Explicar o objetivo do estudo, a metodologia (modelo vencedor) e os
+    resultados (R² e variáveis mais importantes).
+4.  Interpretar o que as variáveis mais importantes significam na prática.
+5.  Refinar as recomendações preliminares, dando-lhes mais contexto.
+6.  Não inventar informações. Baseie-se estritamente nos dados fornecidos.
+
+ESTRUTURA OBRIGATÓRIA DO RELATÓRIO:
+# Relatório Executivo: Análise de Bem-Estar Docente no Chile (PISA 2018)
+
+## 1. Resumo Executivo (Insights Principais)
+(Seja breve e direto. Quais foram as 2-3 descobertas mais importantes?)
+
+## 2. Contexto e Objetivo do Estudo
+(Qual era o alvo da análise e o que buscávamos entender?)
+
+## 3. Metodologia: Seleção do Modelo Preditivo
+(Qual modelo venceu (OLS, RF)? Por quê (R²)? Explique o R² encontrado.)
+(Mencione a média da variável alvo se ela for extrema (ex: 0.98), pois
+isso explica a dificuldade em obter um R² alto.)
+
+## 4. Principais Fatores Preditivos (Feature Importance)
+(Quais foram as variáveis mais importantes que o modelo encontrou?
+Liste-as em ordem e explique o que elas significam.)
+
+## 5. Análise Detalhada dos Índices Utilizados
+(Explique quais perguntas do PISA foram usadas para construir os
+índices-chave, como 'clima_media' ou 'carga_trabalho_media'.)
+
+## 6. Recomendações para Políticas Públicas
+(Refine as recomendações preliminares com base nos seus insights.)
+
+## 7. Limitações e Próximos Passos
+(Quais foram as limitações (ex: R² moderado, dados faltantes)?)
+"""
+
+def _gerar_prompt_usuario(artefatos: dict) -> str:
+    """Formata todos os artefatos em um único prompt de usuário."""
+    
+    prompt_parts = [
+        "Por favor, gere o relatório executivo com base nos seguintes artefatos:",
+        "\n--- INÍCIO DOS ARTEFATOS ---\n"
+    ]
+
+    # 1. Contexto (do JSON)
+    meta = artefatos.get('melhor_modelo_meta', {})
+    contexto_original = meta.get('contexto', {})
+    if contexto_original:
+        prompt_parts.append("== CONTEXTO DO ESTUDO ==\n" + json.dumps(contexto_original, indent=2, ensure_ascii=False))
+
+    # 2. Desempenho do Modelo Vencedor (do JSON)
+    prompt_parts.append("\n== DESEMPENHO DO MODELO VENCEDOR ==\n" +
+                        f"Modelo Vencedor: {meta.get('melhor_modelo')}\n" +
+                        f"Variável Alvo (Y): {meta.get('alvo')}\n" +
+                        f"Preditores (X) Utilizados: {meta.get('features')}\n"
+    )
+    if artefatos.get('alvo_media'):
+        prompt_parts.append(
+            f"Média da Variável Alvo ({meta.get('alvo')}): {artefatos['alvo_media']:.4f}\n" +
+            f"(N Válido: {artefatos.get('alvo_n_validos')})\n"
+        )
+
+    # 3. Comparação de Todos os Modelos (CSV)
+    if artefatos.get('comparacao_modelos_csv'):
+        prompt_parts.append("\n== DESEMPENHO DE TODOS OS MODELOS (R² E MÉTRICAS) ==\n" +
+                            artefatos['comparacao_modelos_csv'])
+
+    # 4. Variáveis Relevantes (CSV da Etapa 9)
+    if artefatos.get('variaveis_relevantes_csv'):
+        prompt_parts.append("\n== PRINCIPAIS VARIÁVEIS (POR IMPORTÂNCIA OU P-VALOR) ==\n" +
+                            artefatos['variaveis_relevantes_csv'])
+    
+    # 5. Composição dos Índices (JSON da Etapa 5)
+    if artefatos.get('composicao_indices'):
+        prompt_parts.append("\n== COMPOSIÇÃO DOS ÍNDICES (A 'RECEITA') ==\n" +
+                            "(Mapeamento de 'Índice Gerado' -> ['Colunas PISA Originais'])\n" +
+                            json.dumps(artefatos['composicao_indices'], indent=2, ensure_ascii=False))
+
+    # 6. Recomendações Preliminares (TXT da Etapa 10)
+    if artefatos.get('recomendacoes_txt'):
+        prompt_parts.append("\n== RECOMENDAÇÕES PRELIMINARES (DA ETAPA 10) ==\n" +
+                            artefatos['recomendacoes_txt'])
+
+    # 7. Correlações (CSV)
+    if artefatos.get('correlacoes_csv'):
+        prompt_parts.append("\n== MATRIZ DE CORRELAÇÃO (AMOSTRA) ==\n" +
+                            artefatos['correlacoes_csv'])
+
+    prompt_parts.append("\n--- FIM DOS ARTEFATOS ---")
+    
+    return "\n".join(prompt_parts)
+
 
 # ============================================================
-# API PÚBLICA DA ETAPA 11
+# FUNÇÕES DE EXECUÇÃO: LLM
 # ============================================================
 
-def gerar_relatorio_automatico(provider: str | None = None, model: str | None = None, cenario: dict | None = None) -> str:
+def _selecionar_provedor_modelo(provider: str | None, model: str | None) -> tuple:
     """
-    provider: "google" | "groq" | "auto" | None
-      - None ou "auto": tenta GROQ, se falhar tenta GOOGLE (ou o inverso, se preferir).
-    model: nome do modelo específico (opcional)
+    Seleciona o cliente da API (Groq ou Google) e o nome do modelo.
+    (Nomes padrão corrigidos para 'gemini-2.5-flash' e 'llama-3.3-70b-versatile')
     """
-    logging.info("ETAPA 11 - Relatório LLM - Preparando prompt e selecionando provedor...")
+    
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    google_api_key = os.environ.get("GOOGLE_API_KEY")
 
-    prompt = _montar_prompt_base(cenario)
-
-    # Respeita parâmetro, senão variável de ambiente, senão 'auto'
-    provider = (provider or os.getenv("LLM_PROVIDER") or "auto").strip().lower()
-
-    if provider == "google":
-        logging.info("ETAPA 11 - Relatório LLM - Provedor selecionado: GOOGLE (Gemini).")
-        texto = _gerar_google(model, prompt)
-
-    elif provider == "groq":
-        logging.info("ETAPA 11 - Relatório LLM - Provedor selecionado: GROQ (Llama).")
-        texto = _gerar_groq(model, prompt)
-
-    else:
-        # Estratégia AUTO: tenta primeiro GROQ, se der erro, tenta GOOGLE
-        logging.info("ETAPA 11 - Relatório LLM - Provedor 'auto': tentando GROQ, depois GOOGLE (fallback).")
+    # Configuração do Google
+    if google_api_key and (provider == "google" or (provider in [None, "auto"] and not groq_api_key)):
         try:
-            texto = _gerar_groq(model, prompt)
-        except Exception as e_groq:
-            logging.warning(f"ETAPA 11 - Groq falhou: {e_groq}. Tentando Google...")
-            texto = _gerar_google(model, prompt)
+            genai.configure(api_key=google_api_key)
+            
+            # ########################################################
+            # # ### INÍCIO DA MODIFICAÇÃO (Nome do Modelo) ###
+            # ########################################################
+            model_name = model if model else "gemini-2.5-flash" # <-- CORRIGIDO
+            # ########################################################
+            # # ### FIM DA MODIFICAÇÃO ###
+            # ########################################################
+            
+            cliente = genai.GenerativeModel(model_name)
+            logging.info(f"Usando Provedor: Google (Modelo: {model_name})")
+            return cliente, "google"
+        except Exception as e:
+            logging.error(f"Falha ao configurar Google Gemini: {e}")
+            if not groq_api_key:
+                 raise ConnectionError("Falha no Google e GROQ_API_KEY não encontrada.")
 
-    if not texto:
-        logging.warning("ETAPA 11 - Relatório LLM - Texto vazio retornado. Verifique logs e chaves de API.")
+    # Configuração do Groq
+    if groq_api_key:
+        try:
+            cliente = Groq(api_key=groq_api_key)
+            
+            # ########################################################
+            # # ### INÍCIO DA MODIFICAÇÃO (Nome do Modelo) ###
+            # ########################################################
+            model_name = model if model else "llama-3.3-70b-versatile" # <-- CORRIGIDO
+            # ########################################################
+            # # ### FIM DA MODIFICAÇÃO ###
+            # ########################################################
+
+            logging.info(f"Usando Provedor: Groq (Modelo: {model_name})")
+            return cliente, "groq"
+        except Exception as e:
+            logging.error(f"Falha ao configurar Groq: {e}")
+            raise ConnectionError("Falha ao inicializar a API do Groq.")
+
+    raise ConnectionError("Nenhuma chave de API (GROQ_API_KEY ou GOOGLE_API_KEY) foi encontrada nas variáveis de ambiente.")
+
+
+def _executar_geracao(cliente, tipo_provedor: str, system_prompt: str, user_prompt: str, model_name: str | None) -> str:
+    """
+    Executa a chamada à API (Groq ou Google) e retorna a resposta em texto.
+    (Usa a sintaxe antiga do Google para compatibilidade)
+    """
+    try:
+        if tipo_provedor == "groq":
+            # ########################################################
+            # # ### INÍCIO DA MODIFICAÇÃO (Nome do Modelo) ###
+            # ########################################################
+            # Garante que o modelo padrão aqui seja o mesmo definido acima
+            model_name = model_name if model_name else "llama-3.3-70b-versatile" # <-- CORRIGIDO
+            # ########################################################
+            # # ### FIM DA MODIFICAÇÃO ###
+            # ########################################################
+            
+            chat_completion = cliente.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                model=model_name,
+                temperature=0.3,
+                max_tokens=4096, # Llama 3.3 tem 8k, mas 4k é seguro para a resposta
+            )
+            return chat_completion.choices[0].message.content
+        
+        elif tipo_provedor == "google":
+            # Usando a sintaxe de compatibilidade (generate_content)
+            # que funcionou na correção anterior.
+            logging.info("Usando sintaxe de compatibilidade do Google (generate_content).")
+            prompt_combinado = [
+                system_prompt,
+                "---", # Separador
+                user_prompt
+            ]
+            response = cliente.generate_content(prompt_combinado)
+            return response.text
+        
+        else:
+            raise ValueError(f"Tipo de provedor desconhecido: {tipo_provedor}")
+
+    except Exception as e:
+        logging.error(f"Erro durante a chamada da API do LLM ({tipo_provedor}): {e}", exc_info=True)
+        if hasattr(e, 'response'):
+            try:
+                erro_api = e.response.json()
+                logging.error(f"Detalhes do erro da API: {erro_api}")
+                return f"Erro ao gerar relatório: {erro_api}"
+            except Exception:
+                return f"Erro ao gerar relatório: {str(e)}"
+        return f"Erro ao gerar relatório: {str(e)}"
+
+
+# ============================================================
+# FUNÇÃO PRINCIPAL: PONTO DE ENTRADA
+# (Esta seção inteira não foi alterada)
+# ============================================================
+
+def gerar_relatorio_automatico(provider: str | None = None, model: str | None = None):
+    etapa = "ETAPA 11 - Relatório Automático (LLM)"
+    logging.info(f"({etapa}) - Iniciando geração de relatório...")
+    
+    base_path = Path("resultados/textos_llm")
+    base_path.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # 1. Coleta de dados
+        logging.info(f"({etapa}) - Coletando artefatos das Etapas 1-10...")
+        artefatos = _coletar_artefatos()
+        if not artefatos.get('melhor_modelo_meta'):
+            raise FileNotFoundError("Artefatos essenciais (melhor_modelo.json) não encontrados.")
+
+        # 2. Seleção do Provedor
+        logging.info(f"({etapa}) - Selecionando provedor de LLM...")
+        cliente, tipo_provedor = _selecionar_provedor_modelo(provider, model)
+        
+        # 3. Geração dos Prompts
+        logging.info(f"({etapa}) - Gerando prompts (sistema e usuário)...")
+        system_prompt = _gerar_prompt_sistema()
+        user_prompt = _gerar_prompt_usuario(artefatos)
+        
+        (base_path / f"prompt_usuario_{datetime.now():%Y%m%d_%H%M%S}.txt").write_text(
+            user_prompt, encoding="utf-8"
+        )
+
+        # 4. Execução
+        logging.info(f"({etapa}) - Executando chamada à API {tipo_provedor.upper()}... (Isso pode levar um momento)")
+        relatorio_texto = _executar_geracao(
+            cliente,
+            tipo_provedor,
+            system_prompt,
+            user_prompt,
+            model_name=model
+        )
+
+        # 5. Salvamento
+        if not relatorio_texto or len(relatorio_texto) < 100:
+             logging.warning(f"({etapa}) - Resposta do LLM foi curta ou vazia: {relatorio_texto}")
+             raise ValueError("A resposta do LLM foi muito curta ou vazia.")
+             
+        caminho_relatorio = base_path / "relatorio_final_llm.md"
+        caminho_relatorio.write_text(relatorio_texto, encoding="utf-8")
+        
+        logging.info(f"({etapa}) - Relatório final salvo com sucesso em '{caminho_relatorio}'")
+        return relatorio_texto
+
+    except Exception as e:
+        logging.error(f"[ERRO FATAL] Falha na Etapa 11: {e}", exc_info=True)
+        (base_path / "relatorio_ERRO.txt").write_text(f"Falha ao gerar o relatório: {e}", encoding="utf-8")
+        return None
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] (%(levelname)s) %(message)s")
+    print("Executando Etapa 11 em modo de teste...")
+    if not Path("resultados/tabelas/melhor_modelo.json").exists():
+        print("\n[ERRO DE TESTE]")
+        print("Os artefatos das Etapas 1-10 não existem.")
+        print("Execute 'python main.py --no-llm' primeiro para gerar os resultados.")
     else:
-        caminho = _salvar_relatorio(texto)
-        logging.info(f"ETAPA 11 - Relatório LLM - Relatório salvo em '{caminho}'.")
-    return texto
+        gerar_relatorio_automatico()
