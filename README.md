@@ -182,10 +182,11 @@ O pipeline traduz achados estatísticos em recomendações, como:
 
 ---
 
-## 🧑‍🏫 Autor
+## 🧑‍🏫 Autores
 
-**Prof. Kleber**  
-Pesquisador em TI e Educação • Especialista em IA Educacional
+Christiane
+Kleber Galvão
+Mariah
 
 ---
 
