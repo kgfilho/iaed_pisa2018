@@ -184,9 +184,9 @@ O pipeline traduz achados estatísticos em recomendações, como:
 
 ## 🧑‍🏫 Autores
 
-Christiane
-Kleber Galvão
-Mariah
+- Christiane
+- Kleber Galvão
+- Mariah
 
 ---
 
